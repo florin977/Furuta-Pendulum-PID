@@ -19,8 +19,6 @@ AccelStepper stepper(AccelStepper::DRIVER, stepPin, dirPin);
 
 volatile long encoderPosition = 0;
 
-// Create an instance of the AS5600 class
-// AMS_5600 ams5600;
 float pendulum_initial_position = 0.0f;
 float pendulum_target_deg = 180.0;
 float motor_target_pos = 0.0;
@@ -29,22 +27,26 @@ float prevError = 0.0;
 float integral = 0.0;
 
 // // Variables for PID control
-// float Kp = 3.0;
-// float Ki = 0.0;
-// float Kd = 0.0;
+/*
+float Kp = 5.0;
+float Ki = 0.0;
+float Kd = 0.0;
+*/
 
 // Ziegler-Nichols parameters
 float Ku = 2.0; // critical gain
 float Tu = 0.1; // oscillation period
 
 // Variables for PID control
-float Kp = 1.5 * Ku;
-float Ki = 0.15 * Kp / Tu;
+float Kp = 10 * Ku; // Was 1.5
+float Ki = 0 * Kp / Tu; // Was 0.15
 float Kd = 0 * Kp * Tu / 8;
 
 // Define the control frequency and period
-const int controlFrequency = 1000;                // in Hertz
+const int controlFrequency = 10000;                // in Hertz
 const float controlPeriod = 1 / controlFrequency; // in seconds
+
+bool justStarted = true;
 
 // Define variables for moving average filter
 double pendulum_actual_deg;
@@ -53,6 +55,7 @@ double pendulum_actual_deg;
 enum State
 {
     WAITING,
+    SWINGING_UP,
     BALANCING
 };
 State state = WAITING;
@@ -171,12 +174,6 @@ void setup()
     stepper.setMaxSpeed(200000);
     stepper.setAcceleration(100000);
 
-    // Set the enable pin for the stepper motor driver and
-    // invert it because we are using a DRV8825 board with an
-    // active-low enable signal (LOW = enabled, HIGH = disabled)
-/*    stepper.setEnablePin(5);
-    stepper.setPinsInverted(false, false, true);
-*/
     // Set initial position
     tare_pendulum_encoder();
 
@@ -223,7 +220,7 @@ void loop()
     int revs = pendulum_actual_deg / 360;
     pendulum_target_deg = 180.0f * (pendulum_actual_deg > 0 ? 1.0f : -1.0f) + 360.0f * (float)revs;
 
-    float margin_in_deg = 20.0; // in degrees
+    float margin_in_deg = 30.0; // in degrees
     bool pendulum_close_to_vertical = fabs(pendulum_target_deg - pendulum_actual_deg) <= margin_in_deg;
 
     if (state == WAITING)
@@ -239,6 +236,20 @@ void loop()
             // Set the motor target position to the current position
             motor_target_pos = stepper.currentPosition();
         }
+
+        else if (elapsedTime >= controlPeriod)
+        {
+            
+            float current_pendulum_velocity = calculate_velocity_simple(pendulum_actual_deg, elapsedTime);
+
+            //motor_target_pos = stepper.currentPosition() + swing_up_bang_bang(pendulum_actual_deg, current_pendulum_velocity);
+            motor_target_pos = stepper.currentPosition() + swing_up_bang_bang_improved(pendulum_actual_deg, current_pendulum_velocity);
+
+            stepper.moveTo(motor_target_pos);
+        }
+
+        stepper.moveTo(motor_target_pos);
+        stepper.run();
     }
     else if (state == BALANCING)
     {
@@ -288,12 +299,6 @@ void loop()
         // Update motor target position based on PID output
         motor_target_pos = stepper.currentPosition() + output;
 
-        // Limit the motor target position to prevent the motor from moving beyond +-90 degrees
-        /*if (abs(motor_target_pos) > convertDegreesToSteps(90))
-        {
-            motor_target_pos = stepper.currentPosition();
-        }
-        */
         // Move the motor
         stepper.moveTo(motor_target_pos);
     }
@@ -306,8 +311,6 @@ void loop()
         // Run the stepper motor
         stepper.run();
     }
-
-    print_plot(motor_target_pos, pendulum_actual_deg);
 }
 
 long convertDegreesToSteps(float degrees)
@@ -345,15 +348,103 @@ float convertRawAngleToDegrees()
         first_reading = false;
     }
     long delta = raw - raw_prev;
-    // Handle wrap around
-    /*if (delta > 599)
-        delta -= 1200;
-    if (delta < -599)
-        delta += 1200;
-    */// Map the 0-1199 segments of the Encoder to 0–360 degrees
-    // 360 degrees / 1200 segments = 0.3 degrees per segment
     position += (float)delta * 0.3;
     raw_prev = raw;
 
     return position;
+}
+
+// Helper function to get sign of a number
+float sign(float value)
+{
+    if (value > 0) return 1.0f;
+    if (value < 0) return -1.0f;
+    return 0.0f;
+}
+
+float calculate_velocity_simple(float current_position_deg, float elapsed_time_sec)
+{
+    static float previous_position = 0.0f;
+    static bool first_call = true;
+    
+    if (first_call)
+    {
+        previous_position = current_position_deg;
+        first_call = false;
+        return 0.0f;
+    }
+    
+    float velocity = (current_position_deg - previous_position) / elapsed_time_sec;
+    previous_position = current_position_deg;
+
+    return velocity; // degrees per second
+}
+
+// Simple bang-bang swing-up controller
+float swing_up_bang_bang(float pendulum_angle_deg, float pendulum_velocity_deg_per_sec)
+{
+
+    static const float SWING_AMPLITUDE = 5000.0f;
+    static const float VELOCITY_THRESHOLD = 10.0f;
+    static const float ANGLE_THRESHOLD = 60.0f; // Aplicăm control doar când e aproape de jos
+    
+    float control_output = 0.0f;
+    
+    // Aplicăm control doar când pendulul se mișcă suficient de repede
+    // și este în zona de jos (nu când e sus)
+    if (fabs(pendulum_velocity_deg_per_sec) > VELOCITY_THRESHOLD 
+        && fabs(pendulum_angle_deg) < ANGLE_THRESHOLD
+        )
+    {
+        // REGULA SIMPLĂ: Aplică forță în direcția mișcării pentru a adăuga energie
+        control_output = SWING_AMPLITUDE * -sign(pendulum_velocity_deg_per_sec);
+    }
+    
+    return control_output;
+}
+
+float swing_up_bang_bang_improved(float pendulum_angle_deg, float pendulum_velocity_deg_per_sec)
+{
+    static const float SWING_AMPLITUDE = 12000.0f;      // Amplitudine de bază mai mare
+    static const float VELOCITY_THRESHOLD = 12.0f;      // Prag mai mic pentru mai mult control
+    static const float ANGLE_THRESHOLD = 120.0f;        // Extinde zona de control mult mai sus
+    static const float HIGH_ANGLE_THRESHOLD = 80.0f;    // Zona critică de la 80°
+    static const float HIGH_ANGLE_AMPLITUDE = 20000.0f; // Amplitudine foarte mare pentru zona critică
+    static const float ULTRA_HIGH_THRESHOLD = 120.0f;   // Zona ultra-critică
+    static const float ULTRA_HIGH_AMPLITUDE = 25000.0f; // Amplitudine maximă pentru ultima împingere
+    
+    float control_output = 0.0f;
+    float abs_angle = fabs(pendulum_angle_deg);
+    float abs_velocity = fabs(pendulum_velocity_deg_per_sec);
+    
+    // Control activ până la 120° pentru a forța pendulul să treacă de 160°
+    if (abs_velocity > VELOCITY_THRESHOLD && abs_angle < ANGLE_THRESHOLD)
+    {
+        float amplitude = SWING_AMPLITUDE;
+        
+        // Amplitudine progresivă în funcție de unghi
+        if (abs_angle > ULTRA_HIGH_THRESHOLD)
+        {
+            // Zona finală - forță maximă pentru a trece de 160°
+            amplitude = ULTRA_HIGH_AMPLITUDE;
+        }
+        else if (abs_angle > HIGH_ANGLE_THRESHOLD)
+        {
+            // Zona critică - forță mare
+            amplitude = HIGH_ANGLE_AMPLITUDE;
+        }
+        
+        // În zona foarte înaltă (>100°), reduci pragul de viteză pentru mai mult control
+        float velocity_threshold = VELOCITY_THRESHOLD;
+        if (abs_angle > 100.0f) {
+            velocity_threshold = 8.0f; // Control mai agresiv la unghiuri mari
+        }
+        
+        if (abs_velocity > velocity_threshold) {
+            float energy_direction = -sign(pendulum_velocity_deg_per_sec);
+            control_output = amplitude * energy_direction;
+        }
+    }
+    
+    return control_output;
 }
