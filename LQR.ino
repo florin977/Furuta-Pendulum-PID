@@ -1,11 +1,13 @@
 #include <AccelStepper.h>
 
 // Gains for the system (tune these for a more stable system)
-float K[4] = {0, 0, 574.8237, 0}; // Calculated in Matlab; First 2 with '+' instead of '-' ?
+float K[4] = {0.1, 0, 774.8237, 5}; // Calculated in Matlab; First 2 with '+' instead of '-' ?
 
-float Kp = 700;
-float Ki = 1;
-float Kd = 0.01;
+double alpha = 1.0;
+
+float Kp = 300;
+float Ki = 0.3;
+float Kd = 0.03;
 
 float integral = 0;
 bool firstPIDcall = true;
@@ -19,7 +21,7 @@ bool firstPIDcall = true;
 AccelStepper stepper(AccelStepper::DRIVER, STEP_PIN, DIR_PIN);
 
 // Constants
-#define STEPS_PER_REV 200 * 4 // 200 Full steps * 4 microstepping
+#define STEPS_PER_REV 200 * 8 // 200 Full steps * 8 microstepping
 #define ENCODER_COUNTS 1200
 #define DEGREES_PER_COUNT 360 / 1200
 #define SWING_UP_START 100
@@ -57,7 +59,7 @@ enum STATE
   WAITING
 };
 
-STATE state = SWINGING_UP;
+STATE state = WAITING;
 
 void resetPosition()
 {
@@ -74,23 +76,8 @@ void resetPosition()
 // Alpha coeffiecient for software low-pass filter
 double alphaFromFrequency(double freq, double dt)
 {
-    // Compute the angular frequency (omega)
-    double omega = 2.0 * M_PI * freq;
-
-    // Compute the smoothing coefficient (alpha)
-    double coeff = (1.0 - omega * dt / 2.0) / (1.0 + omega * dt / 2.0);
-
-    // Clamp the coefficient between 0.0 and 1.0 to prevent instability
-    if (coeff < 0.0)
-    {
-        coeff = 0.0;
-    }
-    if (coeff > 1.0)
-    {
-        coeff = 1.0;
-    }
-
-    return coeff;
+    double RC = 1.0 / (2.0 * M_PI * freq);
+    return dt / (RC + dt);
 }
 
 void printDebugging(float targetSpeed, float currendPendulumPosition)
@@ -186,15 +173,20 @@ float sign(float value)
 float computePendulumVelocity(float currentPendulumVelocityPosition, float elapsedPendulumVeclocityTime)
 {
   static float previousPendulumVelocityPosition = 0.0;
+  static float lastVelocity = 0.0;
 
   if (firstPendulumVelocityCall)
   {
     firstPendulumVelocityCall = false;
+    lastVelocity = 0.0;
     previousPendulumVelocityPosition = currentPendulumVelocityPosition;
     return 0.0;
   }
 
   float velocity = (currentPendulumVelocityPosition - previousPendulumVelocityPosition) / elapsedPendulumVeclocityTime;
+  velocity = velocity * alpha + (1.0 - alpha) * lastVelocity;
+
+  lastVelocity = velocity;
   previousPendulumVelocityPosition = currentPendulumVelocityPosition;
 
   return velocity;
@@ -203,16 +195,21 @@ float computePendulumVelocity(float currentPendulumVelocityPosition, float elaps
 float computeStepperVelocity(long currentStepperVelocityPosition, float elapsedStepperVeclocityTime)
 {
   static float previousStepperVelocityPosition = 0.0;
+  static float lastVelocity = 0.0;
 
   if (firstStepperVelocityCall)
   {
     firstStepperVelocityCall = false;
+    lastVelocity = 0.0;
     previousStepperVelocityPosition = currentStepperVelocityPosition;
     return 0.0;
   }
 
   float velocity = (currentStepperVelocityPosition - previousStepperVelocityPosition) / elapsedStepperVeclocityTime;
+  velocity = velocity * alpha + (1.0 - alpha) * lastVelocity;
+
   previousStepperVelocityPosition = currentStepperVelocityPosition;
+  lastVelocity = velocity;
 
   return velocity;
 }
@@ -253,7 +250,52 @@ float SwingUpController(double pendulumPosition, float pendulumVelocity)
     swingUpPosition = -swingUpPosition;
   }
 
+  if (swingUpPosition >= 1000)
+  {
+    swingUpPosition = SWING_UP_START;
+  }
+
   return swingUpPosition;
+}
+
+float energyBasedController(double pendulumPosition, float pendulumVelocity)
+{
+  // Constants (tuneable)
+  const float mass = 0.04;            // kg
+  const float g = 9.81;               // gravity
+  const float l = 0.17;               // pendulum length (meters)
+  const float energyGain = 0.7;      // tuneable gain
+
+  // Convert to radians
+  float theta = pendulumPosition * RADIANS_PER_DEGREE;
+  float thetaDot = pendulumVelocity * RADIANS_PER_DEGREE;
+
+  // Normalize angle to [-π, π]
+  if (theta > M_PI) theta -= 2 * M_PI;
+  if (theta < -M_PI) theta += 2 * M_PI;
+
+  // Kinetic energy
+  float KE = 0.5 * mass * l * l * thetaDot * thetaDot;
+
+  // Potential energy (zero at bottom)
+  float PE = mass * g * l * (1 - cos(theta));
+
+  // Total energy
+  float totalEnergy = KE + PE;
+
+  // Energy at upright position
+  float uprightEnergy = 2 * mass * g * l;
+
+  // Energy difference
+  float energyError = totalEnergy - uprightEnergy;
+
+  // Sign for direction of actuation
+  float direction = thetaDot * cos(theta);
+
+  // Final control signal
+  float output = energyGain * energyError * sign(direction);
+
+  return output;
 }
 
 void setup()
@@ -275,7 +317,15 @@ void setup()
 
 void loop()
 {
+  static float lastPendulumPosition = 0.0;
+
   pendulumCurrentPosition = convertRawAngleToDegrees();
+  //pendulumCurrentPosition = pendulumCurrentPosition * alpha + (1.0 - alpha) * lastPendulumPosition;
+  
+  lastPendulumPosition = pendulumCurrentPosition;
+
+  //Serial.println(pendulumCurrentPosition);
+  //delay(10);
 
   if (state != SWINGING_UP)
   {
@@ -297,7 +347,7 @@ void loop()
 
   float elapsedTimeSeconds = (float) dt * 1e-6;
 
-  double alpha = alphaFromFrequency(500.0, (double) dt * 1e-6);
+  alpha = alphaFromFrequency(200.0, (double) dt * 1e-6);
 
   // Find closes upright target
   pendulumTargetPosition = 180.0 * (pendulumCurrentPosition > 0 ? 1.0 : -1.0);
@@ -365,6 +415,7 @@ void loop()
           pendulumVelocity = computePendulumVelocity(pendulumCurrentPosition, elapsedTimeSeconds);
 
           float output = SwingUpController(pendulumCurrentPosition, pendulumVelocity);
+          //float output = energyBasedController(pendulumCurrentPosition, pendulumVelocity);
 
           stepper.moveTo(output);
         }
