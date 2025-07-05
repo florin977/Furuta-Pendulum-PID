@@ -5,9 +5,9 @@ float K[4] = {0.1, 0, 774.8237, 5}; // Calculated in Matlab; First 2 with '+' in
 
 double alpha = 1.0;
 
-float Kp = 300;
-float Ki = 0.3;
-float Kd = 0.03;
+float Kp = 325; // 225
+float Ki = 0.1; // 0.1
+float Kd = 0.01; // 0.01
 
 float integral = 0;
 bool firstPIDcall = true;
