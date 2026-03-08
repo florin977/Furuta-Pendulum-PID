@@ -4,7 +4,7 @@ A real-time embedded control system designed to maintain equilibrium on a physic
 
 ## Demo
 
-*[Drag and drop your video file here when editing on GitHub]*
+https://github.com/user-attachments/assets/03d556b9-91ac-409e-8e29-39d9371ed93b
 
 ---
 
@@ -61,7 +61,7 @@ The codebase also includes the mathematical framework for advanced control algor
 1. Clone the repository:
 
    ```bash
-   git clone [https://github.com/florin977/Furuta-Pendulum-PID.git](https://github.com/florin977/Furuta-Pendulum-PID.git)
+   git clone https://github.com/florin977/Furuta-Pendulum-PID.git
    ```
 
 2. Open the project in Arduino IDE.
